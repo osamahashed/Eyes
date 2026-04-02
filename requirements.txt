@@ -1,0 +1,10 @@
+openvino==2024.0.0
+opencv-python==4.8.1.78
+numpy==1.24.3
+PyQt6==6.5.1
+PySide6>=6.5.1
+pynput==1.7.6
+mediapipe==0.10.7
+scipy==1.11.3
+screeninfo==0.8.1
+psutil>=5.9.0
