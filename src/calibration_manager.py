@@ -19,6 +19,7 @@ class CalibrationManager:
         self.point_frame_count = 0
         self.current_samples = []
         self.recent_points = []
+        self.recent_head_poses = []
         self.calibration_pairs = []
         self.last_quality = 0.0
         self.last_stability = None
@@ -44,6 +45,7 @@ class CalibrationManager:
         self.point_frame_count = 0
         self.current_samples = []
         self.recent_points = []
+        self.recent_head_poses = []
         self.calibration_pairs = []
         self.last_quality = 0.0
         self.last_stability = None
@@ -60,15 +62,27 @@ class CalibrationManager:
         quality = float(sample.get("tracking_quality", 0.0))
         head_pose = sample.get("head_pose", {})
         blink_triggered = bool(sample.get("blink_triggered", False))
-        yaw = abs(float(head_pose.get("yaw", 0.0)))
-        pitch = abs(float(head_pose.get("pitch", 0.0)))
+        yaw_signed = float(head_pose.get("yaw", 0.0))
+        pitch_signed = float(head_pose.get("pitch", 0.0))
+        yaw = abs(yaw_signed)
+        pitch = abs(pitch_signed)
 
         self.last_quality = quality
         self.recent_points.append(point)
+        self.recent_head_poses.append([yaw_signed, pitch_signed])
+        
         stable_window = int(self.config["calibration"]["stable_window"])
         self.recent_points = self.recent_points[-stable_window:]
+        self.recent_head_poses = self.recent_head_poses[-stable_window:]
+        
         stability = self._compute_stability(self.recent_points)
         self.last_stability = stability
+        
+        if len(self.recent_head_poses) > 1:
+            head_pts = np.asarray(self.recent_head_poses, dtype=np.float32)
+            head_variance = float(np.var(head_pts[:, 0]) + np.var(head_pts[:, 1]))
+        else:
+            head_variance = 0.0
 
         settle_frames = int(self.config["calibration"]["settle_frames"])
         samples_per_point = int(self.config["calibration"]["samples_per_point"])
@@ -76,24 +90,27 @@ class CalibrationManager:
         max_stability = float(self.config["calibration"]["max_stability"])
         max_head_yaw = float(self.config["calibration"]["max_head_yaw"])
         max_head_pitch = float(self.config["calibration"]["max_head_pitch"])
+        max_head_variance = float(self.config["calibration"].get("max_head_variance", 5.0))
 
         settled = self.point_frame_count > settle_frames
         stable = stability is not None and stability <= max_stability
+        head_stable = head_variance <= max_head_variance
         pose_ok = yaw <= max_head_yaw and pitch <= max_head_pitch
         quality_ok = quality >= min_tracking_quality
         is_blinking = sample.get("is_blinking", False)
         # NEVER capture during any blink state (active or settling)
-        ready = settled and stable and pose_ok and quality_ok and not blink_triggered and not is_blinking
-        self.last_hint = self._build_hint(settled, stable, pose_ok, quality_ok, blink_triggered or is_blinking, quality, stability)
+        ready = settled and stable and head_stable and pose_ok and quality_ok and not blink_triggered and not is_blinking
+        self.last_hint = self._build_hint(settled, stable, pose_ok, head_stable, quality_ok, blink_triggered or is_blinking, quality, stability)
 
         if ready:
             self.current_samples.append(
                 {
                     "normalized_point": point,
+                    "raw_gaze_ratio": sample.get("raw_gaze_ratio"),
                     "tracking_quality": quality,
                     "stability": stability,
-                    "yaw": yaw,
-                    "pitch": pitch,
+                    "yaw": yaw_signed,
+                    "pitch": pitch_signed,
                 }
             )
 
@@ -120,6 +137,9 @@ class CalibrationManager:
             {
                 "screen_point": screen_point.tolist(),
                 "gaze_point": aggregated["center"].tolist(),
+                "raw_gaze_ratio": aggregated["raw_gaze_ratio"].tolist() if isinstance(aggregated["raw_gaze_ratio"], np.ndarray) else list(aggregated["raw_gaze_ratio"]),
+                "yaw": aggregated["yaw"],
+                "pitch": aggregated["pitch"],
                 "tracking_quality": aggregated["tracking_quality"],
                 "stability": aggregated["stability"],
                 "effective_samples": aggregated["effective_samples"],
@@ -130,6 +150,7 @@ class CalibrationManager:
         self.point_frame_count = 0
         self.current_samples = []
         self.recent_points = []
+        self.recent_head_poses = []
         self.last_hint = "أحسنت! انتقل بعينيك إلى الهدف التالي..."
 
         if self.current_index >= len(self.points):
@@ -247,8 +268,15 @@ class CalibrationManager:
 
         center = np.mean(inliers, axis=0)
         inlier_samples = [sample for sample, keep in zip(samples, inlier_mask) if keep]
+        
+        raw_gaze_ratios = [s["raw_gaze_ratio"] for s in inlier_samples if s["raw_gaze_ratio"] is not None]
+        avg_raw_gaze = np.mean(raw_gaze_ratios, axis=0) if raw_gaze_ratios else center
+        
         return {
             "center": center,
+            "raw_gaze_ratio": avg_raw_gaze,
+            "yaw": float(np.mean([s["yaw"] for s in inlier_samples])),
+            "pitch": float(np.mean([s["pitch"] for s in inlier_samples])),
             "effective_samples": len(inliers),
             "tracking_quality": float(np.mean([sample["tracking_quality"] for sample in inlier_samples])),
             "stability": float(np.mean([sample["stability"] for sample in inlier_samples])),
@@ -256,22 +284,37 @@ class CalibrationManager:
         }
 
     def _finalize(self):
-        gaze_points = np.array([pair["gaze_point"] for pair in self.calibration_pairs], dtype=np.float32)
+        gaze_points = np.array([
+            [
+                pair["gaze_point"][0], 
+                pair["gaze_point"][1],
+                pair.get("raw_gaze_ratio", pair["gaze_point"])[0],
+                pair.get("raw_gaze_ratio", pair["gaze_point"])[1],
+                pair.get("yaw", 0.0),
+                pair.get("pitch", 0.0)
+            ]
+            for pair in self.calibration_pairs
+        ], dtype=np.float32)
         screen_points = np.array([pair["screen_point"] for pair in self.calibration_pairs], dtype=np.float32)
 
         models_to_try = self._models_to_try(len(gaze_points))
         fits = [self._fit_model(gaze_points, screen_points, model_name) for model_name in models_to_try]
         
-        # Robust selection: Prefer Affine if Quadratic is too erratic (CV error > 1.5x)
-        best_fit = fits[0] # Affine is usually first
+        # Robust selection: We compare models and choose the best one
+        best_fit = fits[0] 
         if len(fits) > 1:
-            affine = fits[0]
-            quad = fits[1]
-            if quad["cross_validation_error_px"] < affine["cross_validation_error_px"] * 1.5:
-                # Only use quadratic if it's significantly better or not much worse (preventing overfitting/jumps)
-                best_fit = quad if quad["cross_validation_error_px"] < affine["cross_validation_error_px"] else affine
-            else:
-                best_fit = affine
+            best_error = fits[0]["cross_validation_error_px"]
+            for fit in fits[1:]:
+                # We give affine a slight advantage, quadratic/compensated goes if significantly better
+                coeff_penalty = 1.0
+                if fit["model_name"] == "quadratic":
+                    coeff_penalty = 1.5
+                elif fit["model_name"] == "affine_pose_compensated":
+                    coeff_penalty = 1.1 # Prefer it if it's 10% better or more to avoid overfitting flat poses
+                    
+                if fit["cross_validation_error_px"] < best_error * (2.0 - coeff_penalty):
+                    best_fit = fit
+                    best_error = fit["cross_validation_error_px"]
 
         # Accuracy Heatmap Data Generation
         accuracy_report_data = []
@@ -321,9 +364,13 @@ class CalibrationManager:
         preferred = self.config["calibration"].get("preferred_model", "auto")
         if preferred == "affine":
             return ["affine"]
+        if preferred == "affine_pose_compensated":
+            return ["affine_pose_compensated"]
         if preferred == "quadratic":
             return ["quadratic"] if sample_count >= 6 else ["affine"]
-        models = ["affine"]
+        
+        # default "auto" explores affine vs affine_pose_compensated
+        models = ["affine", "affine_pose_compensated"]
         if sample_count >= 6:
             models.append("quadratic")
         return models
@@ -371,11 +418,21 @@ class CalibrationManager:
 
     def _feature_matrix(self, points, model_name):
         points = np.asarray(points, dtype=np.float32)
-        x = points[:, 0:1]
-        y = points[:, 1:2]
+        x = points[:, 0:1] # blended_x
+        y = points[:, 1:2] # blended_y
+        raw_x = points[:, 2:3]
+        raw_y = points[:, 3:4]
+        yaw = points[:, 4:5]
+        pitch = points[:, 5:6]
+        
         ones = np.ones((len(points), 1), dtype=np.float32)
         if model_name == "quadratic":
             return np.hstack((x, y, x * y, x * x, y * y, ones)).astype(np.float32)
+        elif model_name == "affine_pose_compensated":
+            norm_yaw = yaw / 45.0
+            norm_pitch = pitch / 45.0
+            return np.hstack((raw_x, raw_y, norm_yaw, norm_pitch, ones)).astype(np.float32)
+            
         return np.hstack((x, y, ones)).astype(np.float32)
 
     def _compute_stability(self, points):
@@ -386,11 +443,13 @@ class CalibrationManager:
         distances = np.linalg.norm(arr - center, axis=1)
         return float(np.mean(distances))
 
-    def _build_hint(self, settled, stable, pose_ok, quality_ok, blink_triggered, quality, stability):
+    def _build_hint(self, settled, stable, pose_ok, head_stable, quality_ok, blink_triggered, quality, stability):
         if not settled:
             return "استعد... النقطة التالية تظهر الآن"
         if not pose_ok:
             return "حافظ على استقامة رأسك للحصول على أدق النتائج"
+        if not head_stable:
+            return "رأسك يتحرك! يرجى تثبيت الرأس تماماً..."
         if not quality_ok:
             return "تنبيه: الإضاءة ضعيفة أو المسافة غير مثالية"
         if blink_triggered:

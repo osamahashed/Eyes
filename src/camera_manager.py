@@ -13,6 +13,7 @@ class CameraManager:
         self.active = False
         self.thread = None
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self.on_disconnect = None
 
     def start(self):
         if self.active:
@@ -56,13 +57,22 @@ class CameraManager:
 
     def _capture_loop(self):
         frame_interval = 1 / max(self.config["video"]["fps"], 1)
+        fail_count = 0
         while self.active:
             ret, frame = self.cap.read()
             if ret:
+                fail_count = 0
                 enhanced_frame = self._enhance_frame(frame)
                 with self.frame_lock:
                     self.latest_frame = enhanced_frame
                     self.latest_timestamp = time.perf_counter()
+            else:
+                fail_count += 1
+                if fail_count > 20: # ~2 seconds of missed frames at 10fps retry 
+                    self.active = False
+                    if self.on_disconnect:
+                        self.on_disconnect()
+                    break
             time.sleep(frame_interval * 0.35)
 
     def _enhance_frame(self, frame):

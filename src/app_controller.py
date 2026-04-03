@@ -1,9 +1,43 @@
 import logging
 import os
 import time
+import threading
 from queue import Empty, Queue
 
 import numpy as np
+
+class TrackingWorker(threading.Thread):
+    def __init__(self, camera_manager, gaze_estimator, result_queue):
+        super().__init__(daemon=True)
+        self.camera_manager = camera_manager
+        self.gaze_estimator = gaze_estimator
+        self.result_queue = result_queue
+        self.active = False
+        
+    def start_worker(self):
+        self.active = True
+        self.start()
+        
+    def stop_worker(self):
+        self.active = False
+        
+    def run(self):
+        last_ts = 0.0
+        while self.active:
+            ts = self.camera_manager.get_latest_timestamp()
+            if ts > last_ts:
+                frame = self.camera_manager.get_frame()
+                if frame is not None:
+                    result = self.gaze_estimator.process_frame(frame)
+                    while not self.result_queue.empty():
+                        try:
+                            self.result_queue.get_nowait()
+                        except Empty:
+                            pass
+                    self.result_queue.put({"tracking_result": result, "ts": ts})
+                last_ts = ts
+            else:
+                time.sleep(0.005)
 
 try:
     import psutil
@@ -46,6 +80,9 @@ class AppController(QtCore.QObject):
             self.cursor_mapper.monitors,
             self.action_queue,
         )
+        self.tracking_queue = Queue()
+        self.tracking_worker = TrackingWorker(self.camera_manager, self.gaze_estimator, self.tracking_queue)
+        self.camera_manager.on_disconnect = self._on_camera_disconnect
         self.hotkeys = HotkeyManager(config.data, self.action_queue)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._tick)
@@ -58,9 +95,14 @@ class AppController(QtCore.QObject):
         self.fps_samples = []
         self.last_blink_info = None
         self.last_action = "recalibrate for new direction mapping" if calibration_exists and loaded_calibration is None else "none"
+        self.last_tracking_result = None
+
+    def _on_camera_disconnect(self):
+        self.action_queue.put({"action": "camera_disconnected"})
 
     def start(self):
         self.camera_manager.start()
+        self.tracking_worker.start_worker()
         self.hotkeys.start()
         self.ui.show()
         self.timer.start(self.config.data["ui"]["processing_interval_ms"])
@@ -69,21 +111,30 @@ class AppController(QtCore.QObject):
         self.timer.stop()
         self.hotkeys.stop()
         self.ui.hide_calibration_overlay()
+        self.tracking_worker.stop_worker()
+        if self.tracking_worker.is_alive():
+            self.tracking_worker.join(1.0)
         self.gaze_estimator.close()
         self.camera_manager.stop()
 
     def _tick(self):
         self._process_actions()
-        frame = self.camera_manager.get_frame()
         now_perf = time.perf_counter()
+        
+        while not self.tracking_queue.empty():
+            try:
+                msg = self.tracking_queue.get_nowait()
+                self.last_tracking_result = msg["tracking_result"]
+            except Empty:
+                break
 
-        if frame is None:
+        if not self.camera_manager.is_running() or self.camera_manager.get_frame() is None:
             self._update_calibration_ui_only()
             self._push_runtime_state(face_detected=False, fps=0.0)
             return
 
         dt = self._update_timing(now_perf)
-        tracking_result = self.gaze_estimator.process_frame(frame)
+        tracking_result = self.last_tracking_result
         self.ui.set_tracking_result(tracking_result)
 
         if tracking_result is None:
@@ -109,8 +160,8 @@ class AppController(QtCore.QObject):
             if blink_info.get("is_blinking", False):
                 cursor_text = "المؤشر: متجمد (رمش العين)"
             else:
-                # Map raw gaze to screen, then apply sensitivity for motion amplification
-                screen_pos_raw = self.cursor_mapper.map_gaze_to_screen(raw_point)
+                # Map raw gaze and tracking data to screen
+                screen_pos_raw = self.cursor_mapper.map_gaze_to_screen(tracking_result)
                 
                 # Apply sensitivity gain centered on the monitor center (optional but common)
                 # Or just use the raw mapped position if mapping is 1:1.
@@ -206,6 +257,11 @@ class AppController(QtCore.QObject):
                     self.camera_manager.start()
                     self.ui.toggle_camera_button.setText("إيقاف الكاميرا 📹")
                     self.last_action = "جاري فتح الكاميرا..."
+            elif action == "camera_disconnected":
+                self.camera_manager.stop()
+                self.ui.toggle_camera_button.setText("فتح الكاميرا 📹")
+                self.last_action = "⚠️ إنقطع اتصال الكاميرا فجأة!"
+                self.last_tracking_result = None
 
     def _start_calibration(self):
         # Ensure camera is active
@@ -233,6 +289,7 @@ class AppController(QtCore.QObject):
         event = self.calibration_manager.observe(
             {
                 "normalized_point": raw_point,
+                "raw_gaze_ratio": tracking_result.get("raw_gaze_ratio"),
                 "tracking_quality": tracking_result["tracking_quality"],
                 "head_pose": tracking_result["head_pose"],
                 "is_blinking": blink_info.get("is_blinking", False),

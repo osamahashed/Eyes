@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "created_at": "2026-04-03T20:11:43",
+  "created_at": "2026-04-03T23:20:38",
   "monitor_index": 0,
   "monitor_bounds": {
     "x": 0,
@@ -16,99 +16,107 @@
     "head_weight_x": 0.95,
     "head_weight_y": 0.85,
     "vertical_gain": 1.2,
-    "preferred_model": "auto",
+    "preferred_model": "affine_pose_compensated",
     "order": "center-out"
   },
   "mapping": {
-    "name": "affine",
+    "name": "affine_pose_compensated",
     "coefficients": [
       [
-        11028.1962890625,
-        -1045.609130859375
+        -8201.79296875,
+        533.2828369140625
       ],
       [
-        262.5429382324219,
-        -7691.39111328125
+        -1543.4017333984375,
+        5217.46630859375
       ],
       [
-        -4916.421875,
-        4954.35498046875
+        1036.9012451171875,
+        3137.752197265625
+      ],
+      [
+        1648.537841796875,
+        -946.9583129882812
+      ],
+      [
+        5581.23583984375,
+        -2341.351806640625
       ]
     ]
   },
-  "mean_error_px": 84.8057861328125,
-  "max_error_px": 205.66351318359375,
-  "cross_validation_error_px": 120.81985770331488,
-  "quality_mean": 0.4806830514535451,
-  "stability_mean": 0.015396647839742554,
-  "validation_state": "good",
+  "mean_error_px": 147.74609375,
+  "max_error_px": 302.76239013671875,
+  "cross_validation_error_px": 268.6649186876085,
+  "quality_mean": 0.43647743739723377,
+  "stability_mean": 0.016385475575661265,
+  "validation_state": "needs_review",
   "accuracy_report": {
     "points": [
       {
         "point_index": 0,
         "screen_x": 683.0,
         "screen_y": 369.0,
-        "error_px": 141.04992703746404,
-        "color_classification": "red"
+        "error_px": 102.01098704982947,
+        "color_classification": "yellow"
       },
       {
         "point_index": 1,
         "screen_x": 683.0,
         "screen_y": 102.5,
-        "error_px": 21.458289149147216,
+        "error_px": 44.73283089246677,
         "color_classification": "green"
       },
       {
         "point_index": 2,
         "screen_x": 683.0,
         "screen_y": 635.5,
-        "error_px": 92.21759869796728,
-        "color_classification": "yellow"
+        "error_px": 209.72068933911436,
+        "color_classification": "red"
       },
       {
         "point_index": 3,
         "screen_x": 1202.0799560546875,
         "screen_y": 369.0,
-        "error_px": 26.962241804703073,
-        "color_classification": "green"
+        "error_px": 105.97948252080296,
+        "color_classification": "yellow"
       },
       {
         "point_index": 4,
         "screen_x": 163.9199981689453,
         "screen_y": 369.0,
-        "error_px": 33.637001907595604,
+        "error_px": 59.31361073235426,
         "color_classification": "green"
       },
       {
         "point_index": 5,
         "screen_x": 1202.0799560546875,
         "screen_y": 102.5,
-        "error_px": 205.66360099781858,
+        "error_px": 302.76239311205325,
         "color_classification": "red"
       },
       {
         "point_index": 6,
         "screen_x": 1202.0799560546875,
         "screen_y": 635.5,
-        "error_px": 79.7240583304505,
-        "color_classification": "yellow"
+        "error_px": 278.29068921601765,
+        "color_classification": "red"
       },
       {
         "point_index": 7,
         "screen_x": 163.9199981689453,
         "screen_y": 102.5,
-        "error_px": 127.98544459387612,
-        "color_classification": "yellow"
+        "error_px": 182.8196435423474,
+        "color_classification": "red"
       },
       {
         "point_index": 8,
         "screen_x": 163.9199981689453,
         "screen_y": 635.5,
-        "error_px": 34.55437664623484,
+        "error_px": 44.084109920860655,
         "color_classification": "green"
       }
     ],
-    "accuracy_score_percent": 39.42443847656249
+    "accuracy_score_percent": 0.0
   },
   "pairs": [
     {
@@ -117,12 +125,18 @@
         369.0
       ],
       "gaze_point": [
-        0.49517905712127686,
-        0.5471762418746948
+        0.49585190415382385,
+        0.6210135221481323
       ],
-      "tracking_quality": 0.48369357638888894,
-      "stability": 0.016996826355655987,
-      "effective_samples": 24
+      "raw_gaze_ratio": [
+        0.533786952495575,
+        0.4291272759437561
+      ],
+      "yaw": 1.9640973725561368,
+      "pitch": 0.3282274427708428,
+      "tracking_quality": 0.44805790960451963,
+      "stability": 0.01685200121758853,
+      "effective_samples": 59
     },
     {
       "screen_point": [
@@ -130,12 +144,18 @@
         102.5
       ],
       "gaze_point": [
-        0.49241599440574646,
-        0.5645946860313416
+        0.5015201568603516,
+        0.669999897480011
       ],
-      "tracking_quality": 0.4863454861111111,
-      "stability": 0.014108332921750844,
-      "effective_samples": 24
+      "raw_gaze_ratio": [
+        0.5238829255104065,
+        0.4001411199569702
+      ],
+      "yaw": 1.5992567563543514,
+      "pitch": 0.43562289627316486,
+      "tracking_quality": 0.4523639455782313,
+      "stability": 0.015409033736023975,
+      "effective_samples": 49
     },
     {
       "screen_point": [
@@ -143,12 +163,18 @@
         635.5
       ],
       "gaze_point": [
-        0.4966357946395874,
-        0.5059159398078918
+        0.5264431834220886,
+        0.5664375424385071
       ],
-      "tracking_quality": 0.47430989583333333,
-      "stability": 0.01155448043330883,
-      "effective_samples": 24
+      "raw_gaze_ratio": [
+        0.5025332570075989,
+        0.4720694124698639
+      ],
+      "yaw": 1.4145710815985997,
+      "pitch": 1.12182300981302,
+      "tracking_quality": 0.44584375,
+      "stability": 0.017030472805102666,
+      "effective_samples": 60
     },
     {
       "screen_point": [
@@ -156,12 +182,18 @@
         369.0
       ],
       "gaze_point": [
-        0.5403486490249634,
-        0.5208165049552917
+        0.5828368663787842,
+        0.5625545978546143
       ],
-      "tracking_quality": 0.48450181159420286,
-      "stability": 0.016122668293183266,
-      "effective_samples": 23
+      "raw_gaze_ratio": [
+        0.4606035053730011,
+        0.47609683871269226
+      ],
+      "yaw": 1.4045520303613048,
+      "pitch": 1.261672481517575,
+      "tracking_quality": 0.4425158898305085,
+      "stability": 0.016872276520451247,
+      "effective_samples": 59
     },
     {
       "screen_point": [
@@ -169,12 +201,18 @@
         369.0
       ],
       "gaze_point": [
-        0.44566610455513,
-        0.5386408567428589
+        0.3936113715171814,
+        0.6224488019943237
       ],
-      "tracking_quality": 0.4805751811594202,
-      "stability": 0.015124321773486294,
-      "effective_samples": 23
+      "raw_gaze_ratio": [
+        0.5854166150093079,
+        0.45290473103523254
+      ],
+      "yaw": 0.4227033669517065,
+      "pitch": 2.4434819618930534,
+      "tracking_quality": 0.4375190972222222,
+      "stability": 0.015628436293142537,
+      "effective_samples": 60
     },
     {
       "screen_point": [
@@ -182,12 +220,18 @@
         102.5
       ],
       "gaze_point": [
-        0.5362357497215271,
-        0.5325474739074707
+        0.5691413283348083,
+        0.5863003134727478
       ],
-      "tracking_quality": 0.4840451388888889,
-      "stability": 0.01603130604295681,
-      "effective_samples": 24
+      "raw_gaze_ratio": [
+        0.4593532681465149,
+        0.48297610878944397
+      ],
+      "yaw": 0.6758631658181549,
+      "pitch": 3.108796182652721,
+      "tracking_quality": 0.43061666666666665,
+      "stability": 0.016071934793144463,
+      "effective_samples": 50
     },
     {
       "screen_point": [
@@ -195,12 +239,18 @@
         635.5
       ],
       "gaze_point": [
-        0.5446917414665222,
-        0.49753355979919434
+        0.5498566031455994,
+        0.6168449521064758
       ],
-      "tracking_quality": 0.4749913194444444,
-      "stability": 0.015555619145743549,
-      "effective_samples": 24
+      "raw_gaze_ratio": [
+        0.47026526927948,
+        0.4824420213699341
+      ],
+      "yaw": 0.46016478466467475,
+      "pitch": 4.680055692860705,
+      "tracking_quality": 0.42266509433962257,
+      "stability": 0.016920407091812143,
+      "effective_samples": 53
     },
     {
       "screen_point": [
@@ -208,12 +258,18 @@
         102.5
       ],
       "gaze_point": [
-        0.4547499716281891,
-        0.556082546710968
+        0.3773903548717499,
+        0.6609074473381042
       ],
-      "tracking_quality": 0.4785748106060606,
-      "stability": 0.01686768356541341,
-      "effective_samples": 22
+      "raw_gaze_ratio": [
+        0.5975027680397034,
+        0.45567426085472107
+      ],
+      "yaw": 0.4272280687466264,
+      "pitch": 4.71704770293475,
+      "tracking_quality": 0.42463124999999996,
+      "stability": 0.016507539590820672,
+      "effective_samples": 50
     },
     {
       "screen_point": [
@@ -221,12 +277,18 @@
         635.5
       ],
       "gaze_point": [
-        0.4503970444202423,
-        0.4963807761669159
+        0.38689160346984863,
+        0.5851353406906128
       ],
-      "tracking_quality": 0.4791102430555556,
-      "stability": 0.016208592026184004,
-      "effective_samples": 24
+      "raw_gaze_ratio": [
+        0.5904257297515869,
+        0.522457480430603
+      ],
+      "yaw": 0.4247168564134174,
+      "pitch": 6.433216261087846,
+      "tracking_quality": 0.4240833333333332,
+      "stability": 0.016177178132865164,
+      "effective_samples": 45
     }
   ]
 }

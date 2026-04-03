@@ -14,6 +14,8 @@ class GazeEstimator:
     NOSE_TIP = 1
     FOREHEAD = 10
     CHIN = 152
+    MOUTH_LEFT = 61
+    MOUTH_RIGHT = 291
 
     def __init__(self, config):
         self.config = config
@@ -59,22 +61,25 @@ class GazeEstimator:
 
         face_width = max(face_right - face_left, 1e-6)
         face_height = max(chin[1] - forehead[1], 1e-6)
-        head_center_x = (face_left + face_right) / 2.0
-        head_center_y = (forehead[1] + chin[1]) / 2.0
+        
         horizontal_sign = -1.0 if self.tracking_cfg.get("invert_x", False) else 1.0
         vertical_sign = -1.0 if self.tracking_cfg.get("invert_y", False) else 1.0
+        
+        # Compute real 3D head pose using MediaPipe's native 3D mesh (Z depth)
+        yaw, pitch, roll = self._compute_head_pose_3d(normalized_points, w, h)
+        
+        head_offset_x = yaw / 45.0  # Normalize roughly between -1 and 1
+        head_offset_y = pitch / 45.0
 
-        head_offset_x = (nose[0] - head_center_x) / face_width
-        head_offset_y = (nose[1] - head_center_y) / face_height
         blended_point = self._blend_gaze_and_head(gaze_ratio, head_offset_x, head_offset_y)
 
         bbox = self._face_bbox(pixel_points[self.FACE_BOX_POINTS], w, h)
         area_ratio = max((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) / max(w * h, 1), 0.0)
 
         head_pose = {
-            "yaw": float(head_offset_x * 120.0 * horizontal_sign),
-            "pitch": float(head_offset_y * 120.0 * vertical_sign),
-            "roll": float(np.degrees(np.arctan2(normalized_points[263][1] - normalized_points[33][1], normalized_points[263][0] - normalized_points[33][0]))),
+            "yaw": float(yaw * horizontal_sign),
+            "pitch": float(pitch * vertical_sign),
+            "roll": float(roll),
         }
 
         return {
@@ -103,6 +108,13 @@ class GazeEstimator:
 
         ratio_x = self._normalize(iris_center[0], min_x, max_x)
         ratio_y = self._normalize(iris_center[1], min_y, max_y)
+        
+        # Stretch the effective iris ratio since physically the center of the iris 
+        # never reaches the exact edges of the eye landmarks. This provides more 
+        # dynamic range for pure eye movement without having to move the head.
+        ratio_x = (ratio_x - 0.5) * 1.5 + 0.5
+        ratio_y = (ratio_y - 0.5) * 1.8 + 0.5
+        
         return np.array([ratio_x, ratio_y], dtype=np.float32)
 
     def _blend_gaze_and_head(self, gaze_ratio, head_offset_x, head_offset_y):
@@ -117,7 +129,11 @@ class GazeEstimator:
         y_offset = (gaze_ratio[1] - 0.5) * eye_weight * vertical_gain + head_offset_y * head_weight_y
         x = 0.5 + x_offset * horizontal_sign
         y = 0.5 + y_offset * vertical_sign
-        return np.array([self._clamp(x), self._clamp(y)], dtype=np.float32)
+        
+        # Remove clamping here! Clamping destroys the linear space for the Regression Calibration.
+        # Calibration can easily map values < 0 or > 1 correctly to screen pixels. 
+        # Unbounded points ensure the cursor reaches the screen edges even if posture changes slightly.
+        return np.array([x, y], dtype=np.float32)
 
     def _face_bbox(self, points, width, height):
         min_xy = np.maximum(np.min(points, axis=0), 0)
@@ -130,3 +146,21 @@ class GazeEstimator:
 
     def _clamp(self, value):
         return float(np.clip(value, 0.0, 1.0))
+
+    def _compute_head_pose_3d(self, normalized_points, w, h):
+        aspect_ratio = float(h) / max(float(w), 1.0)
+        
+        face_left = normalized_points[33]
+        face_right = normalized_points[263]
+        yaw = np.degrees(np.arctan2(face_right[2] - face_left[2], face_right[0] - face_left[0]))
+        
+        forehead = normalized_points[self.FOREHEAD]
+        chin = normalized_points[self.CHIN]
+        pitch = np.degrees(np.arctan2(chin[2] - forehead[2], (chin[1] - forehead[1]) * aspect_ratio))
+        
+        roll = np.degrees(np.arctan2(
+            (normalized_points[263][1] - normalized_points[33][1]) * aspect_ratio, 
+            normalized_points[263][0] - normalized_points[33][0]
+        ))
+        
+        return float(yaw), float(pitch), float(roll)
