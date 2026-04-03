@@ -587,7 +587,13 @@ class UIController(QMainWindow):
         self.dwell_progress.setValue(int(state.get("dwell_progress", 0.0) * 100))
 
     def _click_mode_changed(self, click_mode):
-        self.enqueue_action("set_click_mode", click_mode)
+        mode_map = {
+            "رمشة (Blink)": "Blink",
+            "توقف (Dwell)": "Dwell",
+            "إيقاف (Off)": "Off"
+        }
+        internal_mode = mode_map.get(click_mode, "Blink")
+        self.enqueue_action("set_click_mode", internal_mode)
 
     def _monitor_changed(self, index):
         self.enqueue_action("set_monitor", self.monitor_combo.itemData(index))

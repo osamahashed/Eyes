@@ -105,13 +105,21 @@ class AppController(QtCore.QObject):
         cursor_text = "Cursor: paused"
 
         if not self.gesture_engine.rest_mode and not self.calibration_manager.active:
-            sensitivity = self.ui.get_sensitivity()
-            # Apply sensitivity centered at 0.5 (center of viewport)
-            adjusted_point = np.clip(0.5 + (raw_point - 0.5) * sensitivity, 0.0, 1.0)
-            screen_pos = self.cursor_mapper.map_gaze_to_screen(adjusted_point)
-            smoothed_pos = self.smoothing_filter.filter(np.asarray(screen_pos, dtype=np.float32), dt)
-            self.mouse_controller.move_cursor(*smoothed_pos)
-            cursor_text = f"Cursor: {int(smoothed_pos[0])}, {int(smoothed_pos[1])}"
+            # ANTI-BLINK FREEZE: Prevent cursor jumps during eye blinks
+            if blink_info.get("is_blinking", False):
+                cursor_text = "المؤشر: متجمد (رمش العين)"
+            else:
+                # Map raw gaze to screen, then apply sensitivity for motion amplification
+                screen_pos_raw = self.cursor_mapper.map_gaze_to_screen(raw_point)
+                
+                # Apply sensitivity gain centered on the monitor center (optional but common)
+                # Or just use the raw mapped position if mapping is 1:1.
+                # Here we use the raw mapping as the ground truth.
+                screen_pos = screen_pos_raw
+                
+                smoothed_pos = self.smoothing_filter.filter(np.asarray(screen_pos, dtype=np.float32), dt)
+                self.mouse_controller.move_cursor(*smoothed_pos)
+                cursor_text = f"المؤشر: {int(smoothed_pos[0])}, {int(smoothed_pos[1])}"
 
             click_mode = self.gesture_engine.click_mode
             if click_mode == "Blink" and blink_info["triggered"]:
@@ -218,16 +226,16 @@ class AppController(QtCore.QObject):
         if not self.calibration_manager.active:
             return None
             
-        # During calibration, we MUST use the same sensitive point if we want the mapping to be identical
-        sensitivity = self.ui.get_sensitivity()
+        # IMPORTANT: Calibrate on RAW GAZE to ensure the model captures the full eye range
+        # Do not apply sensitivity or scaling here.
         raw_point = np.asarray(tracking_result["normalized_point"], dtype=np.float32)
-        adjusted_point = np.clip(0.5 + (raw_point - 0.5) * sensitivity, 0.0, 1.0)
 
         event = self.calibration_manager.observe(
             {
-                "normalized_point": adjusted_point,
+                "normalized_point": raw_point,
                 "tracking_quality": tracking_result["tracking_quality"],
                 "head_pose": tracking_result["head_pose"],
+                "is_blinking": blink_info.get("is_blinking", False),
                 "blink_triggered": blink_info["triggered"],
             }
         )

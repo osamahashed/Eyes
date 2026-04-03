@@ -16,6 +16,8 @@ class GestureEngine:
         self.rest_mode = False
         self.blink_start = None
         self.blink_triggered = False
+        self.last_blink_end = 0.0
+        self.is_active_blink = False
         self.click_mode = config["click"].get("mode", "Blink")
 
     def set_click_mode(self, click_mode):
@@ -42,9 +44,15 @@ class GestureEngine:
         threshold = self.config["click"]["ear_threshold"]
         min_close_s = self.config["click"]["min_close_ms"] / 1000.0
         cooldown_s = max(self.config["click"]["double_blink_window_ms"] / 1000.0, 0.2)
-
         triggered = False
-        if ear < threshold:
+
+        # Active blink detection for cursor freezing
+        # A slightly higher threshold than the click threshold to catch the START of the blink
+        freeze_threshold = threshold + 0.04 
+        settle_period_s = 0.20 # 200ms hysteresis
+        
+        if ear < freeze_threshold:
+            self.is_active_blink = True
             if self.blink_start is None:
                 self.blink_start = now
             elif not self.blink_triggered and now - self.blink_start >= min_close_s:
@@ -53,14 +61,22 @@ class GestureEngine:
                     self.blink_triggered = True
                     triggered = True
         else:
+            if self.is_active_blink:
+                self.last_blink_end = now
+                self.is_active_blink = False
+            
             self.blink_start = None
             self.blink_triggered = False
 
+        # Return True if we are inside the settle window or eyes are currently closed
+        is_blinking_now = (ear < freeze_threshold) or (now - self.last_blink_end < settle_period_s)
+        
         return {
             "triggered": triggered,
             "ear": ear,
             "left_ear": left_ear,
             "right_ear": right_ear,
+            "is_blinking": is_blinking_now,
         }
 
     def detect_dwell(self, cursor_pos, current_time):

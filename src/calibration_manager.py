@@ -81,8 +81,10 @@ class CalibrationManager:
         stable = stability is not None and stability <= max_stability
         pose_ok = yaw <= max_head_yaw and pitch <= max_head_pitch
         quality_ok = quality >= min_tracking_quality
-        ready = settled and stable and pose_ok and quality_ok and not blink_triggered
-        self.last_hint = self._build_hint(settled, stable, pose_ok, quality_ok, blink_triggered, quality, stability)
+        is_blinking = sample.get("is_blinking", False)
+        # NEVER capture during any blink state (active or settling)
+        ready = settled and stable and pose_ok and quality_ok and not blink_triggered and not is_blinking
+        self.last_hint = self._build_hint(settled, stable, pose_ok, quality_ok, blink_triggered or is_blinking, quality, stability)
 
         if ready:
             self.current_samples.append(
