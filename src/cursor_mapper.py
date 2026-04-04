@@ -115,6 +115,12 @@ class CursorMapper:
 
     def _predict_calibrated(self, data_vector):
         model_name = self._mapping_name()
+        
+        if model_name == "grid_mapping":
+            gaze = data_vector[:2] # blended_x, blended_y
+            mapping = self.calibration["mapping"]["coefficients"]
+            return self._interpolate_grid(gaze, mapping["gaze_grid"], mapping["screen_grid"])
+            
         coefficients = np.asarray(self._mapping_coefficients(), dtype=np.float32)
         features = self._feature_vector(data_vector, model_name)
         return features @ coefficients
@@ -149,3 +155,72 @@ class CursorMapper:
             return np.array([raw_x, raw_y, norm_yaw, norm_pitch, 1.0], dtype=np.float32)
             
         return np.array([x, y, 1.0], dtype=np.float32)
+
+    def _interpolate_grid(self, gaze_point, gaze_grid, screen_grid):
+        gaze_point = np.asarray(gaze_point, dtype=np.float32)
+        gaze_grid = np.asarray(gaze_grid, dtype=np.float32)
+        screen_grid = np.asarray(screen_grid, dtype=np.float32)
+        
+        # Predefined triangle topology forcing consistent diagonals (0-4, 1-5, 3-7, 4-8)
+        # Assuming grid is strictly row-major exactly as 0,1,2, 3,4,5, 6,7,8
+        triangles = [
+            (0, 1, 4), (0, 4, 3), # Top-Left
+            (1, 2, 5), (1, 5, 4), # Top-Right
+            (3, 4, 7), (3, 7, 6), # Bottom-Left
+            (4, 5, 8), (4, 8, 7)  # Bottom-Right
+        ]
+        
+        best_triangle_idx = -1
+        best_bary = None
+        max_min_bary = -float('inf')
+        
+        for idx_A, idx_B, idx_C in triangles:
+            A = gaze_grid[idx_A]
+            B = gaze_grid[idx_B]
+            C = gaze_grid[idx_C]
+            
+            # Compute Barycentric coordinates
+            v0 = B - A
+            v1 = C - A
+            v2 = gaze_point - A
+            
+            d00 = np.dot(v0, v0)
+            d01 = np.dot(v0, v1)
+            d11 = np.dot(v1, v1)
+            d20 = np.dot(v2, v0)
+            d21 = np.dot(v2, v1)
+            
+            denom = d00 * d11 - d01 * d01
+            if abs(denom) < 1e-6:
+                continue
+                
+            v = (d11 * d20 - d01 * d21) / denom
+            w = (d00 * d21 - d01 * d20) / denom
+            u = 1.0 - v - w
+            
+            min_bary = min(u, v, w)
+            if min_bary >= 0:
+                # Point is strictly inside this triangle
+                best_triangle_idx = (idx_A, idx_B, idx_C)
+                best_bary = (u, v, w)
+                break
+                
+            # Track the closest triangle for out-of-bounds extrapolation
+            if min_bary > max_min_bary:
+                max_min_bary = min_bary
+                best_triangle_idx = (idx_A, idx_B, idx_C)
+                best_bary = (u, v, w)
+                
+        if best_triangle_idx == -1:
+            # Fallback safety
+            return np.array([gaze_point[0]*1920, gaze_point[1]*1080], dtype=np.float32)
+            
+        u, v, w = best_bary
+        idx_A, idx_B, idx_C = best_triangle_idx
+        
+        screen_p = (
+            u * screen_grid[idx_A] +
+            v * screen_grid[idx_B] +
+            w * screen_grid[idx_C]
+        )
+        return screen_p

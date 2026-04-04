@@ -58,6 +58,7 @@ class CalibrationOverlay(QWidget):
         # Legendary colors (Neon Cyan / Emerald / Success)
         self.color_primary = QColor(0, 229, 255) # Cyan
         self.color_secondary = QColor(0, 255, 170) # Neon Green / Success
+        self.color_moderate = QColor(255, 200, 50) # Yellow / Amber
         self.color_warning = QColor(255, 50, 80) # Modern Red
         self.color_bg = QColor(5, 8, 14, 235) # Near-black futuristic
         
@@ -147,8 +148,12 @@ class CalibrationOverlay(QWidget):
         # Dynamic State color
         current_color = self.color_primary
         if self.stability is not None:
-             if self.stability < 0.012: current_color = self.color_secondary
-             elif self.stability > 0.025: current_color = self.color_warning
+             if self.stability < 0.012:
+                 current_color = self.color_secondary
+             elif self.stability < 0.025:
+                 current_color = self.color_moderate
+             else:
+                 current_color = self.color_warning
 
         # Draw glowing background
         glow_rad = int(current_radius * (3.5 + 0.5 * np.sin(self.pulse_phase * 0.5)))
@@ -222,7 +227,7 @@ class CalibrationOverlay(QWidget):
         
         painter.drawText(panel_rect.left() + 160, y_metrics, f"QA: {int(self.quality*100)}%")
         
-        stab_text = "OK" if self.stability is not None and self.stability < 0.015 else "LOCKING..."
+        stab_text = "OK" if self.stability is not None and self.stability < 0.012 else "WAIT" if self.stability is not None and self.stability < 0.025 else "WARN"
         painter.drawText(panel_rect.left() + 250, y_metrics, f"STB: {stab_text}")
         
         painter.end()

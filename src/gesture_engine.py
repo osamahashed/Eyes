@@ -16,9 +16,13 @@ class GestureEngine:
         self.rest_mode = False
         self.blink_start = None
         self.blink_triggered = False
-        self.last_blink_end = 0.0
-        self.is_active_blink = False
         self.click_mode = config["click"].get("mode", "Blink")
+        
+        self.baseline_ear = None
+        self.blink_state = "IDLE"
+        self.ear_corrected = 1.0
+        self.rapid_movement_until = 0.0
+        self.pitch_history = []
 
     def set_click_mode(self, click_mode):
         if click_mode in self.CLICK_MODES:
@@ -30,53 +34,72 @@ class GestureEngine:
         self.click_mode = self.CLICK_MODES[(current_index + 1) % len(self.CLICK_MODES)]
         return self.click_mode
 
-    def detect_blink(self, landmarks, now=None):
+    def detect_blink(self, landmarks, head_pose, now=None):
         now = now or time.time()
         left_eye = np.asarray(landmarks["left_eye"], dtype=np.float32)
         right_eye = np.asarray(landmarks["right_eye"], dtype=np.float32)
         left_ear = self._calculate_ear(left_eye)
         right_ear = self._calculate_ear(right_eye)
-        ear = (left_ear + right_ear) / 2.0
+        raw_ear = (left_ear + right_ear) / 2.0
+        
+        pitch = float(head_pose.get("pitch", 0.0))
+        
+        # Rapid movement safety
+        self.pitch_history.append((now, pitch))
+        self.pitch_history = [sample for sample in self.pitch_history if now - sample[0] < 0.3]
+        if len(self.pitch_history) > 2:
+            pitches = [p for _, p in self.pitch_history]
+            pitch_delta = max(pitches) - min(pitches)
+            if pitch_delta > 5.0:
+                self.rapid_movement_until = now + 0.3
+                
+        # Apply Pitch Compensation
+        k_pitch = 0.0035
+        self.ear_corrected = raw_ear + (k_pitch * pitch)
+        
+        # Determine threshold
+        if self.baseline_ear is not None:
+            threshold = self.baseline_ear * 0.70
+        else:
+            threshold = float(self.config["click"]["ear_threshold"])
 
-        self.ear_history.append((now, ear))
+        self.ear_history.append((now, self.ear_corrected))
         self.ear_history = [sample for sample in self.ear_history if now - sample[0] < 1.0]
 
-        threshold = self.config["click"]["ear_threshold"]
-        min_close_s = self.config["click"]["min_close_ms"] / 1000.0
-        cooldown_s = max(self.config["click"]["double_blink_window_ms"] / 1000.0, 0.2)
         triggered = False
-
-        # Active blink detection for cursor freezing
-        # A slightly higher threshold than the click threshold to catch the START of the blink
-        freeze_threshold = threshold + 0.04 
-        settle_period_s = 0.20 # 200ms hysteresis
         
-        if ear < freeze_threshold:
-            self.is_active_blink = True
-            if self.blink_start is None:
-                self.blink_start = now
-            elif not self.blink_triggered and now - self.blink_start >= min_close_s:
-                if now - self.last_click >= cooldown_s:
-                    self.last_click = now
-                    self.blink_triggered = True
-                    triggered = True
-        else:
-            if self.is_active_blink:
-                self.last_blink_end = now
-                self.is_active_blink = False
-            
+        if now < self.rapid_movement_until:
+            self.blink_state = "IDLE"
             self.blink_start = None
-            self.blink_triggered = False
+            is_blinking_now = False
+        else:
+            is_blinking_now = self.ear_corrected < threshold
+            if is_blinking_now:
+                if self.blink_state == "IDLE":
+                    self.blink_start = now
+                    self.blink_state = "CLOSING"
+                elif self.blink_state in ["CLOSING", "CLOSED"]:
+                    blink_duration = now - self.blink_start
+                    if 0.12 <= blink_duration <= 0.4:
+                        self.blink_state = "CLOSED"
+            else:
+                if self.blink_state == "CLOSED":
+                    # Successfully recovered after staying low enough
+                    cooldown_s = max(self.config["click"]["double_blink_window_ms"] / 1000.0, 0.2)
+                    if now - self.last_click >= cooldown_s:
+                        self.last_click = now
+                        triggered = True
+                
+                self.blink_state = "IDLE"
+                self.blink_start = None
 
-        # Return True if we are inside the settle window or eyes are currently closed
-        is_blinking_now = (ear < freeze_threshold) or (now - self.last_blink_end < settle_period_s)
-        
         return {
             "triggered": triggered,
-            "ear": ear,
+            "ear": self.ear_corrected,
+            "raw_ear": raw_ear,
             "left_ear": left_ear,
             "right_ear": right_ear,
-            "is_blinking": is_blinking_now,
+            "is_blinking": self.blink_state != "IDLE",
         }
 
     def detect_dwell(self, cursor_pos, current_time):

@@ -70,6 +70,8 @@ class AppController(QtCore.QObject):
         loaded_calibration = self.calibration_manager.load_calibration()
         self.cursor_mapper = CursorMapper(self.calibration_manager.screen_transform, config.data)
         self.gesture_engine = GestureEngine(config.data)
+        if loaded_calibration and "baseline_ear" in loaded_calibration:
+            self.gesture_engine.baseline_ear = loaded_calibration["baseline_ear"]
         self.smoothing_filter = SmoothingFilter(config.data)
         self.mouse_controller = MouseController()
         self.gaze_estimator = GazeEstimator(config.data)
@@ -149,7 +151,7 @@ class AppController(QtCore.QObject):
         self.cursor_mapper.set_monitor(self.ui.get_selected_monitor_index())
 
         raw_point = np.asarray(tracking_result["normalized_point"], dtype=np.float32)
-        blink_info = self.gesture_engine.detect_blink(tracking_result["blink_landmarks"], now=time.time())
+        blink_info = self.gesture_engine.detect_blink(tracking_result["blink_landmarks"], tracking_result["head_pose"], now=time.time())
         self.last_blink_info = blink_info
         calibration_event = self._handle_calibration(tracking_result, blink_info)
         dwell_progress = 0.0
@@ -294,6 +296,7 @@ class AppController(QtCore.QObject):
                 "head_pose": tracking_result["head_pose"],
                 "is_blinking": blink_info.get("is_blinking", False),
                 "blink_triggered": blink_info["triggered"],
+                "raw_ear": blink_info.get("raw_ear", 1.0),
             }
         )
         # ... resto stays the same ...
@@ -304,6 +307,8 @@ class AppController(QtCore.QObject):
         if event["status"] == "completed":
             calibration_data = event["calibration"]
             self.cursor_mapper.set_calibration(calibration_data)
+            if "baseline_ear" in calibration_data:
+                self.gesture_engine.baseline_ear = calibration_data["baseline_ear"]
             
             # Show results in overlay instead of hiding it
             results_overlay = {

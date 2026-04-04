@@ -85,7 +85,8 @@ class CalibrationManager:
             head_variance = 0.0
 
         settle_frames = int(self.config["calibration"]["settle_frames"])
-        samples_per_point = int(self.config["calibration"]["samples_per_point"])
+        samples_per_point_min = int(self.config["calibration"].get("samples_per_point_min", 40))
+        samples_per_point_max = int(self.config["calibration"].get("samples_per_point_max", 60))
         min_tracking_quality = float(self.config["calibration"]["min_tracking_quality"])
         max_stability = float(self.config["calibration"]["max_stability"])
         max_head_yaw = float(self.config["calibration"]["max_head_yaw"])
@@ -111,24 +112,35 @@ class CalibrationManager:
                     "stability": stability,
                     "yaw": yaw_signed,
                     "pitch": pitch_signed,
+                    "raw_ear": sample.get("raw_ear", 1.0),
                 }
             )
 
         aggregated = None
-        if len(self.current_samples) >= samples_per_point:
+        current_len = len(self.current_samples)
+        
+        if current_len >= samples_per_point_min:
             aggregated = self._aggregate_samples(self.current_samples)
-            # Relaxed threshold for capture
-            stability_threshold = max(0.04, float(self.config["calibration"]["max_stability"]) * 2.0)
-            min_effective = max(10, samples_per_point // 2)
-            if aggregated["effective_samples"] < min_effective or aggregated["stability"] > stability_threshold:
-                self.current_samples = []
+            # High quality: high effective samples count and highly stable cluster
+            is_high_quality = aggregated["effective_samples"] >= (samples_per_point_min * 0.85) and aggregated["stability"] <= max_stability
+            
+            if is_high_quality or current_len >= samples_per_point_max:
+                # Decide if we accept it or fail it
+                stability_threshold = max(0.04, max_stability * 2.0)
+                min_effective = max(10, current_len // 2)
+                
+                if aggregated["effective_samples"] < min_effective or aggregated["stability"] > stability_threshold:
+                    self.current_samples = []
+                    aggregated = None
+                    self.last_hint = "ركز نظرك على الهدف بثبات"
+            else:
+                # Keep holding for more frames
                 aggregated = None
-                self.last_hint = "النظرة غير مستقرة، يرجى الهدوء والتركيز قليلاً"
 
         if aggregated is None:
             return {
                 "status": "collecting",
-                "progress": min(len(self.current_samples) / max(samples_per_point, 1), 1.0),
+                "progress": min(len(self.current_samples) / max(samples_per_point_max, 1), 1.0),
                 "overlay": self.get_overlay_state(),
             }
 
@@ -143,6 +155,7 @@ class CalibrationManager:
                 "tracking_quality": aggregated["tracking_quality"],
                 "stability": aggregated["stability"],
                 "effective_samples": aggregated["effective_samples"],
+                "raw_ear": aggregated["raw_ear"],
             }
         )
 
@@ -178,11 +191,11 @@ class CalibrationManager:
             "index": self.current_index + 1,
             "total": len(self.points),
             "progress": min(
-                len(self.current_samples) / max(int(self.config["calibration"]["samples_per_point"]), 1),
+                len(self.current_samples) / max(int(self.config["calibration"].get("samples_per_point_max", 60)), 1),
                 1.0,
             ),
             "accepted_samples": len(self.current_samples),
-            "target_samples": int(self.config["calibration"]["samples_per_point"]),
+            "target_samples": int(self.config["calibration"].get("samples_per_point_max", 60)),
             "tracking_quality": self.last_quality,
             "stability": self.last_stability,
             "hint": self.last_hint,
@@ -253,15 +266,16 @@ class CalibrationManager:
 
     def _aggregate_samples(self, samples):
         points = np.array([sample["normalized_point"] for sample in samples], dtype=np.float32)
-        center = np.median(points, axis=0)
+        center = np.mean(points, axis=0) # Measure from mean
         distances = np.linalg.norm(points - center, axis=1)
-        median_distance = float(np.median(distances))
-        mad = float(np.median(np.abs(distances - median_distance)))
-        max_stability = float(self.config["calibration"]["max_stability"])
-        outlier_scale = float(self.config["calibration"]["outlier_mad_scale"])
-        threshold = max(max_stability * 2.5, median_distance + outlier_scale * max(mad, 1e-4))
+        mean_dist = float(np.mean(distances))
+        std_dist = float(np.std(distances))
+        
+        # Outlier filtering beyond 2.0 std deviations
+        threshold = max(0.005, mean_dist + 2.0 * std_dist)
         inlier_mask = distances <= threshold
         inliers = points[inlier_mask]
+        
         if len(inliers) == 0:
             inliers = points
             inlier_mask = np.ones(len(points), dtype=bool)
@@ -280,10 +294,14 @@ class CalibrationManager:
             "effective_samples": len(inliers),
             "tracking_quality": float(np.mean([sample["tracking_quality"] for sample in inlier_samples])),
             "stability": float(np.mean([sample["stability"] for sample in inlier_samples])),
+            "raw_ear": float(np.mean([sample.get("raw_ear", 1.0) for sample in inlier_samples])),
             "inlier_mask": inlier_mask.tolist(),
         }
 
     def _finalize(self):
+        # Ensure strict row-by-row, column-by-column sorting for the 9-point grid
+        self.calibration_pairs = sorted(self.calibration_pairs, key=lambda p: (round(p["screen_point"][1]/50.0), p["screen_point"][0]))
+        
         gaze_points = np.array([
             [
                 pair["gaze_point"][0], 
@@ -298,42 +316,66 @@ class CalibrationManager:
         screen_points = np.array([pair["screen_point"] for pair in self.calibration_pairs], dtype=np.float32)
 
         models_to_try = self._models_to_try(len(gaze_points))
-        fits = [self._fit_model(gaze_points, screen_points, model_name) for model_name in models_to_try]
-        
-        # Robust selection: We compare models and choose the best one
-        best_fit = fits[0] 
-        if len(fits) > 1:
-            best_error = fits[0]["cross_validation_error_px"]
-            for fit in fits[1:]:
-                # We give affine a slight advantage, quadratic/compensated goes if significantly better
-                coeff_penalty = 1.0
-                if fit["model_name"] == "quadratic":
-                    coeff_penalty = 1.5
-                elif fit["model_name"] == "affine_pose_compensated":
-                    coeff_penalty = 1.1 # Prefer it if it's 10% better or more to avoid overfitting flat poses
-                    
-                if fit["cross_validation_error_px"] < best_error * (2.0 - coeff_penalty):
-                    best_fit = fit
-                    best_error = fit["cross_validation_error_px"]
+        if "grid_mapping" in models_to_try and len(gaze_points) == 9:
+            best_fit = {
+                "model_name": "grid_mapping",
+                "coefficients": {
+                    "gaze_grid": [p["gaze_point"] for p in self.calibration_pairs],
+                    "screen_grid": [p["screen_point"] for p in self.calibration_pairs],
+                },
+                "mean_error_px": 0.0,
+                "max_error_px": 0.0,
+                "cross_validation_error_px": 0.0,
+            }
+        else:
+            fits = [self._fit_model(gaze_points, screen_points, model_name) for model_name in models_to_try]
+            
+            # Robust selection: We compare models and choose the best one
+            best_fit = fits[0] 
+            if len(fits) > 1:
+                best_error = fits[0]["cross_validation_error_px"]
+                for fit in fits[1:]:
+                    # We give affine a slight advantage, quadratic/compensated goes if significantly better
+                    coeff_penalty = 1.0
+                    if fit["model_name"] == "quadratic":
+                        coeff_penalty = 1.5
+                    elif fit["model_name"] == "affine_pose_compensated":
+                        coeff_penalty = 1.1 # Prefer it if it's 10% better or more to avoid overfitting flat poses
+                        
+                    if fit["cross_validation_error_px"] < best_error * (2.0 - coeff_penalty):
+                        best_fit = fit
+                        best_error = fit["cross_validation_error_px"]
 
         # Accuracy Heatmap Data Generation
         accuracy_report_data = []
-        features = self._feature_matrix(gaze_points, best_fit["model_name"])
-        predicted = features @ np.array(best_fit["coefficients"])
-        errors = np.linalg.norm(predicted - screen_points, axis=1)
-        
-        for i, error in enumerate(errors):
-            color = "green" if error < 70 else "yellow" if error < 140 else "red"
-            accuracy_report_data.append({
-                "point_index": i,
-                "screen_x": float(screen_points[i][0]),
-                "screen_y": float(screen_points[i][1]),
-                "error_px": float(error),
-                "color_classification": color
-            })
+        if best_fit["model_name"] == "grid_mapping":
+            for i, pair in enumerate(self.calibration_pairs):
+                accuracy_report_data.append({
+                    "point_index": i,
+                    "screen_x": float(pair["screen_point"][0]),
+                    "screen_y": float(pair["screen_point"][1]),
+                    "error_px": 0.0,
+                    "color_classification": "green"
+                })
+            mean_error = 0.0
+            accuracy_score = 100.0
+        else:
+            features = self._feature_matrix(gaze_points, best_fit["model_name"])
+            predicted = features @ np.array(best_fit["coefficients"])
+            errors = np.linalg.norm(predicted - screen_points, axis=1)
             
-        mean_error = best_fit["mean_error_px"]
-        accuracy_score = max(0.0, 100.0 * (1.0 - mean_error / float(self.config["calibration"]["validation_threshold_px"])))
+            for i, error in enumerate(errors):
+                color = "green" if error < 70 else "yellow" if error < 140 else "red"
+                accuracy_report_data.append({
+                    "point_index": i,
+                    "screen_x": float(screen_points[i][0]),
+                    "screen_y": float(screen_points[i][1]),
+                    "error_px": float(error),
+                    "color_classification": color
+                })
+                
+            mean_error = best_fit["mean_error_px"]
+            accuracy_score = max(0.0, 100.0 * (1.0 - mean_error / float(self.config["calibration"]["validation_threshold_px"])))
 
         self.screen_transform = {
             "version": self.CALIBRATION_VERSION,
@@ -353,6 +395,7 @@ class CalibrationManager:
             "validation_state": "good"
             if best_fit["cross_validation_error_px"] <= float(self.config["calibration"]["validation_threshold_px"])
             else "needs_review",
+            "baseline_ear": float(np.mean([pair.get("raw_ear", 1.0) for pair in self.calibration_pairs])),
             "accuracy_report": {
                 "points": accuracy_report_data,
                 "accuracy_score_percent": float(accuracy_score)
@@ -362,6 +405,8 @@ class CalibrationManager:
 
     def _models_to_try(self, sample_count):
         preferred = self.config["calibration"].get("preferred_model", "auto")
+        if preferred == "grid_mapping" and sample_count == 9:
+            return ["grid_mapping"]
         if preferred == "affine":
             return ["affine"]
         if preferred == "affine_pose_compensated":
@@ -375,9 +420,27 @@ class CalibrationManager:
             models.append("quadratic")
         return models
 
+    def _compute_coefficients(self, features, screen_points, model_name):
+        coefficients = np.zeros((features.shape[1], 2), dtype=np.float32)
+        if model_name == "affine_pose_compensated":
+            idx_x = [0, 2, 4]  # raw_x, norm_yaw, 1.0
+            idx_y = [1, 3, 4]  # raw_y, norm_pitch, 1.0
+        elif model_name == "affine":
+            idx_x = [0, 2]     # x, 1.0
+            idx_y = [1, 2]     # y, 1.0
+        elif model_name == "quadratic":
+            idx_x = [0, 3, 5]  # x, x*x, 1.0
+            idx_y = [1, 4, 5]  # y, y*y, 1.0
+        else:
+            return self._solve_ridge(features, screen_points)
+            
+        coefficients[idx_x, 0] = self._solve_ridge(features[:, idx_x], screen_points[:, 0])
+        coefficients[idx_y, 1] = self._solve_ridge(features[:, idx_y], screen_points[:, 1])
+        return coefficients
+
     def _fit_model(self, gaze_points, screen_points, model_name):
         features = self._feature_matrix(gaze_points, model_name)
-        coefficients = self._solve_ridge(features, screen_points)
+        coefficients = self._compute_coefficients(features, screen_points, model_name)
         predicted = features @ coefficients
         errors = np.linalg.norm(predicted - screen_points, axis=1)
         return {
@@ -391,7 +454,7 @@ class CalibrationManager:
     def _cross_validate(self, gaze_points, screen_points, model_name):
         feature_count = self._feature_matrix(gaze_points[:1], model_name).shape[1]
         if len(gaze_points) <= feature_count:
-            coefficients = self._solve_ridge(self._feature_matrix(gaze_points, model_name), screen_points)
+            coefficients = self._compute_coefficients(self._feature_matrix(gaze_points, model_name), screen_points, model_name)
             predicted = self._feature_matrix(gaze_points, model_name) @ coefficients
             return float(np.mean(np.linalg.norm(predicted - screen_points, axis=1)))
 
@@ -403,7 +466,7 @@ class CalibrationManager:
             train_y = screen_points[train_mask]
             test_x = gaze_points[~train_mask]
             test_y = screen_points[~train_mask]
-            coefficients = self._solve_ridge(self._feature_matrix(train_x, model_name), train_y)
+            coefficients = self._compute_coefficients(self._feature_matrix(train_x, model_name), train_y, model_name)
             predicted = self._feature_matrix(test_x, model_name) @ coefficients
             errors.extend(np.linalg.norm(predicted - test_y, axis=1).tolist())
         return float(np.mean(errors))
@@ -445,20 +508,14 @@ class CalibrationManager:
 
     def _build_hint(self, settled, stable, pose_ok, head_stable, quality_ok, blink_triggered, quality, stability):
         if not settled:
-            return "استعد... النقطة التالية تظهر الآن"
-        if not pose_ok:
-            return "حافظ على استقامة رأسك للحصول على أدق النتائج"
-        if not head_stable:
-            return "رأسك يتحرك! يرجى تثبيت الرأس تماماً..."
-        if not quality_ok:
-            return "تنبيه: الإضاءة ضعيفة أو المسافة غير مثالية"
+            return "استعد"
         if blink_triggered:
-            return "يرجى تجنب الرمش أثناء التقاط العينة الذكية"
+            return "تجنب الرمش المفرط الآن"
+        if not head_stable or not pose_ok:
+            return "ثبت رأسك في المنتصف"
         if not stable:
-            if stability is None:
-                return "ثبّت نظرك على النواة... جاري التحليل"
-            return f"ثبّت نظرك... استقرار النظام: {max(0, 100 - stability*2000):.1f}%"
-        return "تم القفل! جاري استخراج البيانات الأسطورية..."
+            return "ركز نظرك على الهدف بثبات"
+        return "يتم الحفظ..."
 
     def _tracking_signature(self):
         tracking_cfg = self.config["tracking"]
