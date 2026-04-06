@@ -75,7 +75,7 @@ class GestureEngine:
         else:
             is_blinking_now = self.ear_corrected < threshold
             if is_blinking_now:
-                if self.blink_state == "IDLE":
+                if self.blink_state == "IDLE" or self.blink_start is None:
                     self.blink_start = now
                     self.blink_state = "CLOSING"
                 elif self.blink_state in ["CLOSING", "CLOSED"]:

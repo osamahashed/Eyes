@@ -2,6 +2,74 @@ import numpy as np
 import screeninfo
 
 
+class ThinPlateSpline:
+    def __init__(self, src_pts, dst_pts, reg=1e-3):
+        self.src_pts = np.asarray(src_pts, dtype=np.float32)
+        self.dst_pts = np.asarray(dst_pts, dtype=np.float32)
+        self.num_pts = self.src_pts.shape[0]
+        self.reg = float(reg)
+        
+        # Determine bounds for normalization [0,1]
+        self.src_min = np.min(self.src_pts, axis=0)
+        self.src_max = np.max(self.src_pts, axis=0) + 1e-6
+        self.dst_min = np.min(self.dst_pts, axis=0)
+        self.dst_max = np.max(self.dst_pts, axis=0) + 1e-6
+        
+        src_norm = (self.src_pts - self.src_min) / (self.src_max - self.src_min)
+        dst_norm = (self.dst_pts - self.dst_min) / (self.dst_max - self.dst_min)
+        
+        # Calculate K matrix
+        diff = src_norm[:, np.newaxis, :] - src_norm[np.newaxis, :, :]
+        r2 = np.sum(diff ** 2, axis=-1)
+        # U(r) = r^2 * log(r^2 + epsilon)
+        K = r2 * np.log(r2 + 1e-6)
+        K += np.eye(self.num_pts) * self.reg
+        
+        # Calculate P matrix
+        P = np.hstack([np.ones((self.num_pts, 1)), src_norm])
+        
+        # L matrix
+        L = np.zeros((self.num_pts + 3, self.num_pts + 3))
+        L[:self.num_pts, :self.num_pts] = K
+        L[:self.num_pts, self.num_pts:] = P
+        L[self.num_pts:, :self.num_pts] = P.T
+        
+        # Y matrix
+        Y = np.zeros((self.num_pts + 3, 2))
+        Y[:self.num_pts, :] = dst_norm
+        
+        # Solve for W
+        try:
+            self.W = np.linalg.solve(L, Y)
+        except np.linalg.LinAlgError:
+            self.W = np.linalg.lstsq(L, Y, rcond=None)[0]
+            
+    def transform(self, pts, k_edge=0.0):
+        pts = np.asarray(pts, dtype=np.float32)
+        is_single = pts.ndim == 1
+        if is_single:
+            pts = pts.reshape(1, 2)
+            
+        pts_norm = (pts - self.src_min) / (self.src_max - self.src_min)
+        src_norm = (self.src_pts - self.src_min) / (self.src_max - self.src_min)
+        
+        diff = pts_norm[:, np.newaxis, :] - src_norm[np.newaxis, :, :]
+        r2 = np.sum(diff ** 2, axis=-1)
+        U = r2 * np.log(r2 + 1e-6)
+        
+        P = np.hstack([np.ones((pts.shape[0], 1)), pts_norm])
+        
+        L_eval = np.hstack([U, P])
+        out_norm = L_eval @ self.W
+        
+        # Apply robust Edge Expansion overcoming splines pull-to-center
+        if k_edge > 0.0:
+            out_norm = out_norm + k_edge * (out_norm - 0.5)
+            
+        out = out_norm * (self.dst_max - self.dst_min) + self.dst_min
+        return out[0] if is_single else out
+
+
 class CursorMapper:
     def __init__(self, calibration_data=None, config=None):
         self.config = config or {}
@@ -11,14 +79,23 @@ class CursorMapper:
             self.config.get("monitors", {}).get("selected_monitor_index", 0),
             max(len(self.monitors) - 1, 0),
         )
-        self.calibration = calibration_data
+        self.tps_model = None
+        self.set_calibration(calibration_data)
         
-        # Adaptive Bias Tracker
-        self.gaze_history = []
-        self.fixation_anchor = None
+        self.grid_validation_enabled = False
+        self.last_grid_state = None
 
     def set_calibration(self, calibration_data):
         self.calibration = calibration_data
+        self.tps_model = None
+        
+        if self.calibration and self._mapping_name() == "tps_mapping":
+            coefs = self.calibration.get("mapping", {}).get("coefficients", {})
+            if "gaze_points" in coefs and "screen_points" in coefs:
+                try:
+                    self.tps_model = ThinPlateSpline(coefs["gaze_points"], coefs["screen_points"])
+                except Exception:
+                    self.tps_model = None
 
     def set_monitor(self, index):
         self.monitor_index = max(0, min(index, len(self.monitors) - 1))
@@ -46,28 +123,6 @@ class CursorMapper:
 
         if self._calibration_matches_monitor():
             screen_point = self._predict_calibrated(data_vector)
-            
-            # Adaptive Bias Correction (Fixation Anchor)
-            # If the raw raw_gaze (pure eye movement) is extremely stable, anchor the cursor.
-            self.gaze_history.append(raw_gaze)
-            if len(self.gaze_history) > 12:
-                self.gaze_history.pop(0)
-                
-            if len(self.gaze_history) == 12:
-                hist = np.asarray(self.gaze_history)
-                variance = np.var(hist[:, 0]) + np.var(hist[:, 1])
-                
-                # If variance is very low, the eye is fixating
-                if variance < 0.00005: 
-                    if self.fixation_anchor is None:
-                        self.fixation_anchor = screen_point
-                    else:
-                        # Apply bias correction: pull raw output towards the stable anchor
-                        screen_point = screen_point * 0.1 + self.fixation_anchor * 0.9
-                else:
-                    # Release anchor gracefully if eye moves
-                    self.fixation_anchor = None
-            
             return self._clamp_to_monitor(screen_point, monitor)
         return self._map_raw_to_monitor(point, monitor)
 
@@ -116,10 +171,28 @@ class CursorMapper:
     def _predict_calibrated(self, data_vector):
         model_name = self._mapping_name()
         
-        if model_name == "grid_mapping":
-            gaze = data_vector[:2] # blended_x, blended_y
-            mapping = self.calibration["mapping"]["coefficients"]
-            return self._interpolate_grid(gaze, mapping["gaze_grid"], mapping["screen_grid"])
+        if model_name == "tps_mapping" and self.tps_model is not None:
+            gaze = data_vector[2:4] # pure raw_x, raw_y
+            
+            # Fetch dynamic k_edge multiplier to fight edge-pull
+            k_edge = float(self.config.get("calibration", {}).get("edge_boost", 0.05))
+            screen_p = self.tps_model.transform(gaze, k_edge=k_edge)
+            
+            # Head pose assist removed to isolate gaze completely
+
+            
+            if getattr(self, "grid_validation_enabled", False):
+                self.last_grid_state = {
+                    "gaze_input": gaze,
+                    "screen_p": screen_p,
+                    "barycentric": (0,0,1),
+                    "active_triangle": "TPS_MAPPED",
+                    "screen_grid": self.tps_model.dst_pts,
+                    "gaze_grid": self.tps_model.src_pts,
+                    "triangles_topology": []
+                }
+                
+            return screen_p
             
         coefficients = np.asarray(self._mapping_coefficients(), dtype=np.float32)
         features = self._feature_vector(data_vector, model_name)
@@ -156,71 +229,4 @@ class CursorMapper:
             
         return np.array([x, y, 1.0], dtype=np.float32)
 
-    def _interpolate_grid(self, gaze_point, gaze_grid, screen_grid):
-        gaze_point = np.asarray(gaze_point, dtype=np.float32)
-        gaze_grid = np.asarray(gaze_grid, dtype=np.float32)
-        screen_grid = np.asarray(screen_grid, dtype=np.float32)
-        
-        # Predefined triangle topology forcing consistent diagonals (0-4, 1-5, 3-7, 4-8)
-        # Assuming grid is strictly row-major exactly as 0,1,2, 3,4,5, 6,7,8
-        triangles = [
-            (0, 1, 4), (0, 4, 3), # Top-Left
-            (1, 2, 5), (1, 5, 4), # Top-Right
-            (3, 4, 7), (3, 7, 6), # Bottom-Left
-            (4, 5, 8), (4, 8, 7)  # Bottom-Right
-        ]
-        
-        best_triangle_idx = -1
-        best_bary = None
-        max_min_bary = -float('inf')
-        
-        for idx_A, idx_B, idx_C in triangles:
-            A = gaze_grid[idx_A]
-            B = gaze_grid[idx_B]
-            C = gaze_grid[idx_C]
-            
-            # Compute Barycentric coordinates
-            v0 = B - A
-            v1 = C - A
-            v2 = gaze_point - A
-            
-            d00 = np.dot(v0, v0)
-            d01 = np.dot(v0, v1)
-            d11 = np.dot(v1, v1)
-            d20 = np.dot(v2, v0)
-            d21 = np.dot(v2, v1)
-            
-            denom = d00 * d11 - d01 * d01
-            if abs(denom) < 1e-6:
-                continue
-                
-            v = (d11 * d20 - d01 * d21) / denom
-            w = (d00 * d21 - d01 * d20) / denom
-            u = 1.0 - v - w
-            
-            min_bary = min(u, v, w)
-            if min_bary >= 0:
-                # Point is strictly inside this triangle
-                best_triangle_idx = (idx_A, idx_B, idx_C)
-                best_bary = (u, v, w)
-                break
-                
-            # Track the closest triangle for out-of-bounds extrapolation
-            if min_bary > max_min_bary:
-                max_min_bary = min_bary
-                best_triangle_idx = (idx_A, idx_B, idx_C)
-                best_bary = (u, v, w)
-                
-        if best_triangle_idx == -1:
-            # Fallback safety
-            return np.array([gaze_point[0]*1920, gaze_point[1]*1080], dtype=np.float32)
-            
-        u, v, w = best_bary
-        idx_A, idx_B, idx_C = best_triangle_idx
-        
-        screen_p = (
-            u * screen_grid[idx_A] +
-            v * screen_grid[idx_B] +
-            w * screen_grid[idx_C]
-        )
-        return screen_p
+

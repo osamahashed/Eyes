@@ -171,15 +171,28 @@ class AppController(QtCore.QObject):
                 screen_pos = screen_pos_raw
                 
                 smoothed_pos = self.smoothing_filter.filter(np.asarray(screen_pos, dtype=np.float32), dt)
-                self.mouse_controller.move_cursor(*smoothed_pos)
-                cursor_text = f"المؤشر: {int(smoothed_pos[0])}, {int(smoothed_pos[1])}"
+                
+                # --- Jitter Stabilization (Micro-Deadzone) ---
+                if not hasattr(self, '_last_stable_pos'):
+                    self._last_stable_pos = smoothed_pos
+                
+                # A 2.0 pixel threshold blocks sub-pixel jitter 
+                if np.linalg.norm(smoothed_pos - self._last_stable_pos) < 2.0:
+                    final_pos = self._last_stable_pos
+                else:
+                    final_pos = smoothed_pos
+                    self._last_stable_pos = final_pos
+                # -----------------------------------------------
+
+                self.mouse_controller.move_cursor(*final_pos)
+                cursor_text = f"المؤشر: {int(final_pos[0])}, {int(final_pos[1])}"
 
             click_mode = self.gesture_engine.click_mode
             if click_mode == "Blink" and blink_info["triggered"]:
                 self.mouse_controller.click()
                 self.last_action = "blink click"
             elif click_mode == "Dwell":
-                dwell_info = self.gesture_engine.detect_dwell(np.asarray(smoothed_pos, dtype=np.float32), time.time())
+                dwell_info = self.gesture_engine.detect_dwell(np.asarray(final_pos, dtype=np.float32), time.time())
                 dwell_progress = dwell_info["progress"]
                 if dwell_info["triggered"]:
                     self.mouse_controller.click()
@@ -250,6 +263,11 @@ class AppController(QtCore.QObject):
             elif action == "save_settings":
                 self._save_settings()
                 self.last_action = "تم حفظ الإعدادات بنجاح"
+            elif action == "toggle_grid_validation":
+                self.cursor_mapper.grid_validation_enabled = payload
+                self.last_action = f"Grid Validation {'on' if payload else 'off'}"
+                if not payload:
+                    self.ui.hide_grid_validation()
             elif action == "toggle_camera":
                 if self.camera_manager.is_running():
                     self.camera_manager.stop()
@@ -403,5 +421,56 @@ class AppController(QtCore.QObject):
         if calibration_event and calibration_event.get("status") == "collecting":
             overlay_state = calibration_event.get("overlay") or {}
             runtime_state["last_action"] = overlay_state.get("hint", "calibration sampling")
+
+        if getattr(self.cursor_mapper, "grid_validation_enabled", False) and getattr(self.cursor_mapper, "last_grid_state", None):
+            grid_state = self.cursor_mapper.last_grid_state
+            
+            # Logic for console logging
+            pred = grid_state["screen_p"]
+            min_dist = float('inf')
+            nearest_idx = -1
+            for i, pt in enumerate(grid_state["screen_grid"]):
+                dist = np.linalg.norm(np.array([pred[0] - pt[0], pred[1] - pt[1]]))
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_idx = i
+                    
+            now = time.time()
+            if not hasattr(self, '_last_grid_log_time') or now - getattr(self, '_last_grid_log_time', 0) > 0.5:
+                setattr(self, '_last_grid_log_time', now)
+                
+                # Check target
+                if min_dist <= 20:
+                    status_log = f"OK ({min_dist:.1f}px)"
+                elif min_dist < 150:
+                    status_log = f"WARNING: LARGE ERROR ({min_dist:.1f}px)"
+                else:
+                    status_log = f"Off-target"
+                
+                # Only record error if looking at a point
+                if not hasattr(self, '_grid_error_history'):
+                    self._grid_error_history = []
+                if min_dist < 150:
+                    self._grid_error_history.append(min_dist)
+                    if len(self._grid_error_history) > 10:
+                        self._grid_error_history.pop(0)
+                        
+                avg_err = sum(self._grid_error_history) / len(self._grid_error_history) if getattr(self, '_grid_error_history', []) else 0.0
+                
+                u, v, w = grid_state.get('barycentric') or (0,0,0)
+                sum_uvw = u + v + w
+                tri = grid_state.get('active_triangle')
+                print(f"==> [GRID DEBUG] Target: {nearest_idx} | {status_log} | Tris: {tri} | u,v,w: {u:.2f}, {v:.2f}, {w:.2f} (sum={sum_uvw:.2f})")
+
+            # Route to UI
+            try:
+                mon_idx = self.ui.get_selected_monitor_index()
+                mon = self.ui.get_calibration_monitor_geometry(mon_idx).__dict__
+            except Exception:
+                mon = {"x": 0, "y": 0, "width": 1920, "height": 1080}
+            runtime_state["grid_validation"] = {
+                "monitor": mon,
+                "grid_state": grid_state
+            }
 
         self.ui.set_runtime_state(runtime_state)

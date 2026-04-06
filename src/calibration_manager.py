@@ -266,13 +266,13 @@ class CalibrationManager:
 
     def _aggregate_samples(self, samples):
         points = np.array([sample["normalized_point"] for sample in samples], dtype=np.float32)
-        center = np.mean(points, axis=0) # Measure from mean
+        center = np.median(points, axis=0) # Measure from median for robustness
         distances = np.linalg.norm(points - center, axis=1)
         mean_dist = float(np.mean(distances))
         std_dist = float(np.std(distances))
         
-        # Outlier filtering beyond 2.0 std deviations
-        threshold = max(0.005, mean_dist + 2.0 * std_dist)
+        # Outlier filtering beyond 1.5 std deviations (stricter rejection for noisy inputs)
+        threshold = max(0.01, mean_dist + 1.5 * std_dist)
         inlier_mask = distances <= threshold
         inliers = points[inlier_mask]
         
@@ -280,11 +280,11 @@ class CalibrationManager:
             inliers = points
             inlier_mask = np.ones(len(points), dtype=bool)
 
-        center = np.mean(inliers, axis=0)
+        center = np.median(inliers, axis=0) # Readjust median
         inlier_samples = [sample for sample, keep in zip(samples, inlier_mask) if keep]
         
         raw_gaze_ratios = [s["raw_gaze_ratio"] for s in inlier_samples if s["raw_gaze_ratio"] is not None]
-        avg_raw_gaze = np.mean(raw_gaze_ratios, axis=0) if raw_gaze_ratios else center
+        avg_raw_gaze = np.median(raw_gaze_ratios, axis=0) if raw_gaze_ratios else center
         
         return {
             "center": center,
@@ -300,7 +300,7 @@ class CalibrationManager:
 
     def _finalize(self):
         # Ensure strict row-by-row, column-by-column sorting for the 9-point grid
-        self.calibration_pairs = sorted(self.calibration_pairs, key=lambda p: (round(p["screen_point"][1]/50.0), p["screen_point"][0]))
+        self.calibration_pairs = sorted(self.calibration_pairs, key=lambda p: (float(p["screen_point"][1]), float(p["screen_point"][0])))
         
         gaze_points = np.array([
             [
@@ -316,12 +316,12 @@ class CalibrationManager:
         screen_points = np.array([pair["screen_point"] for pair in self.calibration_pairs], dtype=np.float32)
 
         models_to_try = self._models_to_try(len(gaze_points))
-        if "grid_mapping" in models_to_try and len(gaze_points) == 9:
+        if "tps_mapping" in models_to_try and len(gaze_points) >= 16:
             best_fit = {
-                "model_name": "grid_mapping",
+                "model_name": "tps_mapping",
                 "coefficients": {
-                    "gaze_grid": [p["gaze_point"] for p in self.calibration_pairs],
-                    "screen_grid": [p["screen_point"] for p in self.calibration_pairs],
+                    "gaze_points": [p.get("raw_gaze_ratio", p["gaze_point"]) for p in self.calibration_pairs],
+                    "screen_points": [p["screen_point"] for p in self.calibration_pairs],
                 },
                 "mean_error_px": 0.0,
                 "max_error_px": 0.0,
@@ -348,7 +348,7 @@ class CalibrationManager:
 
         # Accuracy Heatmap Data Generation
         accuracy_report_data = []
-        if best_fit["model_name"] == "grid_mapping":
+        if best_fit["model_name"] == "tps_mapping":
             for i, pair in enumerate(self.calibration_pairs):
                 accuracy_report_data.append({
                     "point_index": i,
@@ -405,8 +405,8 @@ class CalibrationManager:
 
     def _models_to_try(self, sample_count):
         preferred = self.config["calibration"].get("preferred_model", "auto")
-        if preferred == "grid_mapping" and sample_count == 9:
-            return ["grid_mapping"]
+        if preferred == "tps_mapping" and sample_count >= 16:
+            return ["tps_mapping"]
         if preferred == "affine":
             return ["affine"]
         if preferred == "affine_pose_compensated":

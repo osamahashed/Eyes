@@ -286,6 +286,118 @@ class CalibrationOverlay(QWidget):
         return QtCore.QRect(int(left), int(top), int(panel_width), int(panel_height))
 
 
+class GridValidationOverlay(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.grid_state = None
+        self.monitor = None
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.color_primary = QColor(0, 255, 255, 200) # Cyan
+        self.color_secondary = QColor(255, 50, 80, 200) # Red
+        self.color_mesh = QColor(255, 255, 255, 80) # White-ish
+
+    def update_state(self, monitor, grid_state):
+        self.monitor = monitor
+        self.grid_state = grid_state
+        if not self.isVisible():
+            self.setGeometry(self.monitor["x"], self.monitor["y"], self.monitor["width"], self.monitor["height"])
+            self.show()
+            self.raise_()
+        self.update()
+
+    def hide_overlay(self):
+        self.hide()
+
+    def paintEvent(self, _event):
+        if not self.grid_state or not self.monitor:
+            return
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(10, 10, 15, 60))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        screen_grid = self.grid_state["screen_grid"]
+        triangles = self.grid_state["triangles_topology"]
+        
+        # Translate to monitor space
+        painter.translate(-self.monitor["x"], -self.monitor["y"])
+        
+        # Draw Mesh Lines
+        painter.setPen(QPen(self.color_mesh, 2, Qt.PenStyle.DashLine))
+        for A, B, C in triangles:
+            painter.drawLine(int(screen_grid[A][0]), int(screen_grid[A][1]), int(screen_grid[B][0]), int(screen_grid[B][1]))
+            painter.drawLine(int(screen_grid[B][0]), int(screen_grid[B][1]), int(screen_grid[C][0]), int(screen_grid[C][1]))
+            painter.drawLine(int(screen_grid[C][0]), int(screen_grid[C][1]), int(screen_grid[A][0]), int(screen_grid[A][1]))
+            
+        # Highlight active triangle
+        active_tri = self.grid_state["active_triangle"]
+        if active_tri and isinstance(active_tri, tuple) and len(active_tri) == 3:
+            path = QtGui.QPainterPath()
+            path.moveTo(float(screen_grid[active_tri[0]][0]), float(screen_grid[active_tri[0]][1]))
+            path.lineTo(float(screen_grid[active_tri[1]][0]), float(screen_grid[active_tri[1]][1]))
+            path.lineTo(float(screen_grid[active_tri[2]][0]), float(screen_grid[active_tri[2]][1]))
+            path.closeSubpath()
+            painter.setBrush(QBrush(QColor(0, 255, 255, 40)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPath(path)
+
+        # Draw Points
+        for i, pt in enumerate(screen_grid):
+            painter.setPen(QPen(QColor(0, 0, 0), 2))
+            painter.setBrush(QBrush(self.color_primary))
+            painter.drawEllipse(int(pt[0]) - 8, int(pt[1]) - 8, 16, 16)
+            painter.setPen(QPen(QColor(255, 255, 255), 1))
+            painter.drawText(int(pt[0]) - 20, int(pt[1]) - 15, str(i))
+            
+        # Draw Prediction
+        pred = self.grid_state["screen_p"]
+        painter.setPen(QPen(self.color_secondary, 3))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = int(pred[0]), int(pred[1])
+        painter.drawLine(cx - 20, cy, cx + 20, cy)
+        painter.drawLine(cx, cy - 20, cx, cy + 20)
+        painter.drawEllipse(cx - 12, cy - 12, 24, 24)
+        
+        # Calculate Error
+        nearest_idx = -1
+        min_dist = float('inf')
+        for i, pt in enumerate(screen_grid):
+            dist = np.linalg.norm(np.array([pred[0] - pt[0], pred[1] - pt[1]]))
+            if dist < min_dist:
+                min_dist = dist
+                nearest_idx = i
+                
+        # Draw HUD Panel
+        painter.translate(self.monitor["x"], self.monitor["y"])
+        hud_rect = QtCore.QRect(20, 20, 420, 200)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(10, 15, 25, 230)))
+        painter.drawRoundedRect(hud_rect, 10, 10)
+        
+        painter.setPen(QPen(QColor(0, 255, 255), 1))
+        painter.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        gaze = self.grid_state["gaze_input"]
+        y_pos = 45
+        painter.drawText(35, y_pos, f"GAZE NORM: x={gaze[0]:.3f}, y={gaze[1]:.3f}"); y_pos += 25
+        u, v, w = self.grid_state["barycentric"] if self.grid_state["barycentric"] else (0,0,0)
+        painter.drawText(35, y_pos, f"BARYCENTRIC: u={u:.2f}, v={v:.2f}, w={w:.2f}"); y_pos += 25
+        painter.drawText(35, y_pos, f"ACTIVE TRIANGLE: {active_tri}"); y_pos += 25
+        painter.drawText(35, y_pos, f"PREDICTION: {cx}, {cy}"); y_pos += 25
+        
+        error_color = QColor(0, 255, 100) if min_dist <= 20 else QColor(255, 50, 80)
+        painter.setPen(QPen(error_color, 1))
+        painter.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
+        painter.drawText(35, y_pos, f"ERROR (NODE {nearest_idx}): {min_dist:.1f} px")
+        
+        painter.end()
+
+
 class UIController(QMainWindow):
     def __init__(self, camera_manager, gesture_engine, config, monitors, action_queue=None):
         super().__init__()
@@ -298,6 +410,7 @@ class UIController(QMainWindow):
         self.runtime_state = {}
         self.calibration_overlay = CalibrationOverlay()
         self.calibration_overlay.set_config(self.config["calibration"])
+        self.grid_validation_overlay = GridValidationOverlay()
         self._init_ui()
         self.preview_timer = QTimer()
         self.preview_timer.timeout.connect(self.update_preview)
@@ -379,6 +492,11 @@ class UIController(QMainWindow):
         self.save_settings_button.clicked.connect(lambda: self.enqueue_action("save_settings"))
         control_layout.addWidget(self.save_settings_button)
 
+        self.grid_validation_button = QPushButton("التحقق من دقة الشبكة 📐")
+        self.grid_validation_button.setCheckable(True)
+        self.grid_validation_button.clicked.connect(lambda chk: self.enqueue_action("toggle_grid_validation", chk))
+        control_layout.addWidget(self.grid_validation_button)
+
         control_layout.addWidget(QLabel("نمط النقر بالعين"))
         self.click_mode_combo = QComboBox()
         self.click_mode_combo.addItems(["رمشة (Blink)", "توقف (Dwell)", "إيقاف (Off)"])
@@ -451,6 +569,9 @@ class UIController(QMainWindow):
     def set_runtime_state(self, runtime_state):
         self.runtime_state = runtime_state or {}
         self._refresh_runtime_widgets()
+        
+        gv = self.runtime_state.get("grid_validation")
+        self.show_grid_validation(gv)
 
     def get_selected_monitor_index(self):
         return self.monitor_combo.currentData()
@@ -532,6 +653,15 @@ class UIController(QMainWindow):
 
     def hide_calibration_overlay(self):
         self.calibration_overlay.hide_overlay()
+
+    def show_grid_validation(self, overlay_state):
+        if overlay_state is None:
+            self.grid_validation_overlay.hide_overlay()
+        else:
+            self.grid_validation_overlay.update_state(overlay_state["monitor"], overlay_state["grid_state"])
+            
+    def hide_grid_validation(self):
+        self.grid_validation_overlay.hide_overlay()
 
     def snapshot_settings(self):
         return {
